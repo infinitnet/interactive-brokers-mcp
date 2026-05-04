@@ -210,6 +210,40 @@ export class IBClient {
     this.stopTickle();
   }
 
+  /**
+   * Re-authenticate the REST API session after browser OAuth completes.
+   * This must be called after the browser login creates the server-side session.
+   */
+  async reauthenticate(): Promise<void> {
+    try {
+      const authClient = axios.create({
+        baseURL: this.baseUrl,
+        timeout: 30000,
+        httpsAgent: new https.Agent({
+          rejectUnauthorized: false,
+        }),
+      });
+      
+      Logger.log("[REAUTH] Re-authenticating REST session...");
+      await authClient.post("/iserver/reauthenticate");
+      
+      // Verify the reauthentication worked
+      const statusResponse = await authClient.get("/iserver/auth/status");
+      if (statusResponse.data.authenticated) {
+        Logger.log("[REAUTH] Re-authentication successful");
+        this.isAuthenticated = true;
+        this.authAttempts = 0;
+        this.startTickle();
+      } else {
+        Logger.warn("[REAUTH] Re-authentication request sent but auth status is still false, will retry via interceptor");
+        this.isAuthenticated = false;
+      }
+    } catch (error) {
+      Logger.warn("[REAUTH] Re-authentication failed, will fall back to interceptor-based auth:", error);
+      this.isAuthenticated = false;
+    }
+  }
+
   private async authenticate(): Promise<void> {
     Logger.log(`[AUTH] Starting authentication process... (attempt ${this.authAttempts + 1}/${this.maxAuthAttempts})`);
     this.authAttempts++;

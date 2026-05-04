@@ -107,12 +107,22 @@ export class ToolHandlers {
         throw new Error(`Authentication failed: ${result.message}`);
       }
     } else {
-      // In non-headless mode, throw an error asking user to authenticate manually
-      const port = this.context.gatewayManager 
-        ? this.context.gatewayManager.getCurrentPort() 
-        : this.context.config.IB_GATEWAY_PORT;
-      const authUrl = `https://${this.context.config.IB_GATEWAY_HOST}:${port}`;
-      throw new Error(`Authentication required. Please use the 'authenticate' tool to complete the authentication process at ${authUrl}.`);
+      // In non-headless mode, check if the gateway is already authenticated
+      // (the user may have completed browser auth via the authenticate tool)
+      const authStatus = await this.context.ibClient.checkAuthenticationStatus();
+      if (!authStatus) {
+        const port = this.context.gatewayManager 
+          ? this.context.gatewayManager.getCurrentPort() 
+          : this.context.config.IB_GATEWAY_PORT;
+        const authUrl = `https://${this.context.config.IB_GATEWAY_HOST}:${port}`;
+        throw new Error(`Authentication required. Please use the 'authenticate' tool to complete the authentication process at ${authUrl}.`);
+      }
+      // Auth status is true, reauthenticate the REST session if needed
+      try {
+        await this.context.ibClient.reauthenticate();
+      } catch (e) {
+        Logger.warn("[ENSURE-AUTH] Reauthenticate after status check failed, but status is true:", e);
+      }
     }
   }
 
@@ -143,6 +153,46 @@ export class ToolHandlers {
     const authUrl = `https://${this.context.config.IB_GATEWAY_HOST}:${port}`;
     const mode = this.context.config.IB_HEADLESS_MODE ? "headless mode" : "browser mode";
     return `Authentication required. Please use the 'authenticate' tool to complete the authentication process (configured for ${mode}) at ${authUrl}.`;
+  }
+
+  /**
+   * After browser opens for OAuth, poll the gateway until authenticated,
+   * then trigger reauthenticate to establish the REST API session.
+   * This bridges the gap between browser-based OAuth and the REST API auth state.
+   */
+  private startBrowserAuthPolling(authUrl: string, port: number): void {
+    const maxAttempts = 60; // 2 minutes total
+    const initialDelay = 2000; // 2 second initial delay
+    let attempts = 0;
+
+    const poll = async () => {
+      attempts++;
+      Logger.log(`[BROWSER-AUTH-POLL] Attempt ${attempts}/${maxAttempts}`);
+
+      try {
+        const isAuth = await this.context.ibClient.checkAuthenticationStatus();
+        
+        if (isAuth) {
+          Logger.log("[BROWSER-AUTH-POLL] Authentication detected, reauthenticating REST session");
+          // Trigger reauthenticate to establish REST API session
+          await this.context.ibClient.reauthenticate();
+          Logger.log("[BROWSER-AUTH-POLL] Reauthentication successful, REST session established");
+          return; // Success, stop polling
+        }
+      } catch (error) {
+        Logger.warn("[BROWSER-AUTH-POLL] Poll attempt failed:", error);
+      }
+
+      if (attempts < maxAttempts) {
+        const delay = Math.min(initialDelay + (attempts * 500), 10000);
+        setTimeout(poll, delay);
+      } else {
+        Logger.warn("[BROWSER-AUTH-POLL] Timed out waiting for browser authentication");
+      }
+    };
+
+    // Start polling after initial delay
+    setTimeout(poll, initialDelay);
   }
 
   private formatError(error: unknown): string {
@@ -241,6 +291,11 @@ export class ToolHandlers {
       try {
         await open(authUrl);
         
+        // Start polling for authentication to complete
+        // The browser auth creates a server-side session that the REST API can use
+        // We poll until authenticated, then trigger reauthenticate for the REST session
+        this.startBrowserAuthPolling(authUrl, port);
+        
         return {
           content: [
             {
@@ -257,7 +312,8 @@ export class ToolHandlers {
                   "5. Once authenticated, you can use other trading tools"
                 ],
                 browserOpened: true,
-                note: "IB Gateway is running locally - your credentials stay secure on your machine"
+                polling: true,
+                note: "IB Gateway is running locally - your credentials stay secure on your machine. Polling for authentication completion..."
               }, null, 2),
             },
           ],
