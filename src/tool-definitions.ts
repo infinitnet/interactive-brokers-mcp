@@ -34,7 +34,9 @@ export const PlaceOrderZodShape = {
   quantity: IntegerOrStringIntegerZod,
   price: z.number().optional(),
   stopPrice: z.number().optional(),
-  suppressConfirmations: z.boolean().optional()
+  suppressConfirmations: z.boolean().optional(),
+  exchange: z.string().optional(),
+  tif: z.enum(["DAY", "GTC", "IOC", "OPG"]).optional()
 };
 
 export const GetOrderStatusZodShape = {

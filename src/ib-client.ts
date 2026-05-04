@@ -20,6 +20,8 @@ export interface OrderRequest {
   price?: number;
   stopPrice?: number;
   suppressConfirmations?: boolean;
+  exchange?: string;
+  tif?: string;
 }
 
 const isError = (error: unknown): error is Error => {
@@ -324,13 +326,15 @@ export class IBClient {
 
   async getMarketData(symbol: string, exchange?: string): Promise<any> {
     try {
-      // First, get the contract ID for the symbol
-      const searchResponse = await this.client.get(
-        `/iserver/secdef/search?symbol=${symbol}`
-      );
+      // First, get the contract ID for the symbol, optionally filtered by exchange
+      let searchUrl = `/iserver/secdef/search?symbol=${encodeURIComponent(symbol)}`;
+      if (exchange) {
+        searchUrl += `&name=${encodeURIComponent(exchange)}`;
+      }
+      const searchResponse = await this.client.get(searchUrl);
       
       if (!searchResponse.data || searchResponse.data.length === 0) {
-        throw new Error(`Symbol ${symbol} not found`);
+        throw new Error(`Symbol ${symbol}${exchange ? ' on ' + exchange : ''} not found`);
       }
 
       const contract = searchResponse.data[0];
@@ -390,26 +394,33 @@ export class IBClient {
 
   async placeOrder(orderRequest: OrderRequest): Promise<any> {
     try {
-      // First, get the contract ID for the symbol
-      const searchResponse = await this.client.get(
-        `/iserver/secdef/search?symbol=${orderRequest.symbol}`
-      );
+      // First, get the contract ID for the symbol, optionally filtered by exchange
+      let searchUrl = `/iserver/secdef/search?symbol=${encodeURIComponent(orderRequest.symbol)}`;
+      if (orderRequest.exchange) {
+        searchUrl += `&name=${encodeURIComponent(orderRequest.exchange)}`;
+      }
+      const searchResponse = await this.client.get(searchUrl);
       
       if (!searchResponse.data || searchResponse.data.length === 0) {
-        throw new Error(`Symbol ${orderRequest.symbol} not found`);
+        throw new Error(`Symbol ${orderRequest.symbol}${orderRequest.exchange ? ' on ' + orderRequest.exchange : ''} not found`);
       }
 
       const contract = searchResponse.data[0];
       const conid = contract.conid;
 
       // Prepare order object
-      const order = {
+      const order: any = {
         conid: Number(conid), // Ensure conid is number
         orderType: orderRequest.orderType,
         side: orderRequest.action,
         quantity: Number(orderRequest.quantity), // Ensure quantity is number
-        tif: "DAY", // Time in force
+        tif: orderRequest.tif || "DAY", // Time in force - default to DAY to avoid orphaned orders
       };
+
+      // Include exchange if specified
+      if (orderRequest.exchange) {
+        order.exchange = orderRequest.exchange;
+      }
 
       // Add price for limit orders
       if (orderRequest.orderType === "LMT" && orderRequest.price !== undefined) {
