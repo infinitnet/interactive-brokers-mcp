@@ -12,7 +12,7 @@ export interface SavedFlexQuery {
   lastUsed?: string;
 }
 
-export interface FlexQueriesStore {
+interface FlexQueriesStore {
   queries: SavedFlexQuery[];
 }
 

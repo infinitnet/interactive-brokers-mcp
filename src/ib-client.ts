@@ -6,12 +6,12 @@ interface ExtendedAxiosRequestConfig extends AxiosRequestConfig {
   metadata?: { requestId: string };
 }
 
-export interface IBClientConfig {
+interface IBClientConfig {
   host: string;
   port: number;
 }
 
-export interface OrderRequest {
+interface OrderRequest {
   accountId: string;
   symbol: string;
   action: "BUY" | "SELL";

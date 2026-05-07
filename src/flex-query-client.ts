@@ -2,18 +2,18 @@ import axios, { AxiosInstance } from "axios";
 import { Logger } from "./logger.js";
 import { parseStringPromise } from "xml2js";
 
-export interface FlexQueryClientConfig {
+interface FlexQueryClientConfig {
   token: string;
 }
 
-export interface FlexQueryResponse {
+interface FlexQueryResponse {
   referenceCode?: string;
   url?: string;
   error?: string;
   errorCode?: string;
 }
 
-export interface FlexStatementResponse {
+interface FlexStatementResponse {
   data?: string; // XML data
   error?: string;
   errorCode?: string;
@@ -24,6 +24,21 @@ export interface FlexStatementResponse {
  * API Documentation: https://www.interactivebrokers.com/en/software/am/am/reports/flex_web_service_version_3.htm
  */
 export class FlexQueryClient {
+  // IB Flex Web Service error codes that mean "try again shortly" — the statement
+  // is being prepared. All other Fail codes are terminal (bad token, invalid query, etc.).
+  private static readonly TRANSIENT_GET_STATEMENT_ERROR_CODES = new Set([
+    "1001", // Statement could not be generated at this time
+    "1004", // Statement is incomplete at this time
+    "1005", // Settlement data is not ready
+    "1006", // FIFO P/L data is not ready
+    "1007", // MTM P/L data is not ready
+    "1008", // MTM and FIFO P/L data is not ready
+    "1009", // Server is under heavy load
+    "1018", // Too many requests from this token
+    "1019", // Statement generation in progress
+    "1021", // Statement could not be retrieved at this time
+  ]);
+
   private client: AxiosInstance;
   private token: string;
   // Fixed: gdcdyn → ndcdyn, /Universal/servlet → /AccountManagement/FlexWebService
@@ -182,16 +197,21 @@ export class FlexQueryClient {
       const statementResponse = await this.getStatement(sendResponse.referenceCode);
       
       if (statementResponse.error) {
-        // Check if it's a "not ready yet" error
-        if (
-          statementResponse.errorCode === "1019" || // Statement generation in progress
-          statementResponse.error.includes("in progress") ||
-          statementResponse.error.includes("not ready")
-        ) {
-          Logger.log(`[FLEX-QUERY] Statement not ready yet, retrying...`);
+        const code = statementResponse.errorCode ?? "";
+        const normalizedError = statementResponse.error.toLowerCase();
+        const isTransient =
+          FlexQueryClient.TRANSIENT_GET_STATEMENT_ERROR_CODES.has(code) ||
+          normalizedError.includes("in progress") ||
+          normalizedError.includes("not ready") ||
+          normalizedError.includes("try again");
+
+        if (isTransient) {
+          Logger.log(
+            `[FLEX-QUERY] Statement not ready yet (code ${code || "?"}: ${statementResponse.error}), retrying...`
+          );
           continue;
         }
-        
+
         // It's a real error
         return statementResponse;
       }
@@ -224,6 +244,5 @@ export class FlexQueryClient {
     }
   }
 }
-
 
 

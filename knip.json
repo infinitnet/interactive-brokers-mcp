@@ -1,0 +1,12 @@
+{
+  "$schema": "https://unpkg.com/knip@5/schema.json",
+  "ignore": ["ib-gateway/**"],
+  "ignoreDependencies": [
+    "@semantic-release/commit-analyzer",
+    "@semantic-release/github",
+    "@semantic-release/npm",
+    "@semantic-release/release-notes-generator",
+    "conventional-changelog-conventionalcommits",
+    "semantic-release"
+  ]
+}

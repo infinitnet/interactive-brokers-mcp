@@ -31,7 +31,7 @@ export interface ToolHandlerContext {
   flexQueryStorage?: FlexQueryStorage;
 }
 
-export type ToolHandlerResult = {
+type ToolHandlerResult = {
   content: Array<{
     type: "text";
     text: string;

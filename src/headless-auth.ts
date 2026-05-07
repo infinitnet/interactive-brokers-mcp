@@ -12,7 +12,7 @@ export interface HeadlessAuthConfig {
   paperTrading?: boolean;
 }
 
-export interface HeadlessAuthResult {
+interface HeadlessAuthResult {
   success: boolean;
   message: string;
   waitingFor2FA?: boolean;

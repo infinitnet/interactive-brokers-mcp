@@ -86,11 +86,6 @@ export function createIBMCPServer({ config: userConfig }: { config: z.infer<type
   return server;
 }
 
-export { gatewayManager };
-
-
-
-
 
 
 

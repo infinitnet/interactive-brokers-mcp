@@ -39,6 +39,14 @@
   ],
   "author": "Nitay Rabinovich",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/code-rabi/interactive-brokers-mcp.git"
+  },
+  "bugs": {
+    "url": "https://github.com/code-rabi/interactive-brokers-mcp/issues"
+  },
+  "homepage": "https://github.com/code-rabi/interactive-brokers-mcp#readme",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.17.2",
     "axios": "^1.6.0",
