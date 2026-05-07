@@ -377,9 +377,9 @@ describe('IBClient', () => {
           data: { authenticated: false },
         }),
       };
-      
+
       vi.mocked(axios.create).mockReturnValueOnce(mockAuthClient as any);
-      
+
       // Should not throw — handled internally
       await expect(client.reauthenticate()).resolves.not.toThrow();
       expect(mockAuthClient.post).toHaveBeenCalledWith('/iserver/reauthenticate');
@@ -390,11 +390,78 @@ describe('IBClient', () => {
         post: vi.fn().mockRejectedValue(new Error('Connection refused')),
         get: vi.fn(),
       };
-      
+
       vi.mocked(axios.create).mockReturnValueOnce(mockAuthClient as any);
-      
+
       // Should not throw — errors are caught internally
       await expect(client.reauthenticate()).resolves.not.toThrow();
+    });
+
+    it('should stop tickle when reauth status returns false', async () => {
+      vi.useFakeTimers();
+      try {
+        // Step 1: bring tickle up by simulating a successful auth status check.
+        const checkClient = {
+          get: vi.fn().mockResolvedValue({ data: { authenticated: true } }),
+        };
+        vi.mocked(axios.create).mockReturnValueOnce(checkClient as any);
+        await client.checkAuthenticationStatus();
+
+        // Capture the tickle axios instance the next time axios.create is called
+        // (startTickle uses axios.create per ping).
+        const tickleClient = {
+          post: vi.fn().mockResolvedValue({ data: {} }),
+        };
+        // Step 2: trigger reauth failure (status=false). reauthenticate() itself
+        // calls axios.create once; subsequent tickle pings (which should NOT happen)
+        // would also call axios.create.
+        const reauthClient = {
+          post: vi.fn().mockResolvedValue({ data: {} }),
+          get: vi.fn().mockResolvedValue({ data: { authenticated: false } }),
+        };
+        vi.mocked(axios.create).mockReturnValueOnce(reauthClient as any);
+        // Any further axios.create calls (e.g., from a stray tickle) would hit this
+        // mock and produce visible POST /tickle calls.
+        vi.mocked(axios.create).mockReturnValue(tickleClient as any);
+
+        await client.reauthenticate();
+
+        // Advance well past the tickle interval (30s). If tickle were still running
+        // we would see /tickle POSTs against tickleClient.
+        await vi.advanceTimersByTimeAsync(120_000);
+        expect(tickleClient.post).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('should stop tickle when reauth throws', async () => {
+      vi.useFakeTimers();
+      try {
+        // Bring tickle up first.
+        const checkClient = {
+          get: vi.fn().mockResolvedValue({ data: { authenticated: true } }),
+        };
+        vi.mocked(axios.create).mockReturnValueOnce(checkClient as any);
+        await client.checkAuthenticationStatus();
+
+        const tickleClient = {
+          post: vi.fn().mockResolvedValue({ data: {} }),
+        };
+        const reauthClient = {
+          post: vi.fn().mockRejectedValue(new Error('Connection refused')),
+          get: vi.fn(),
+        };
+        vi.mocked(axios.create).mockReturnValueOnce(reauthClient as any);
+        vi.mocked(axios.create).mockReturnValue(tickleClient as any);
+
+        await client.reauthenticate();
+
+        await vi.advanceTimersByTimeAsync(120_000);
+        expect(tickleClient.post).not.toHaveBeenCalled();
+      } finally {
+        vi.useRealTimers();
+      }
     });
   });
 

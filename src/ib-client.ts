@@ -239,10 +239,12 @@ export class IBClient {
       } else {
         Logger.warn("[REAUTH] Re-authentication request sent but auth status is still false, will retry via interceptor");
         this.isAuthenticated = false;
+        this.stopTickle();
       }
     } catch (error) {
       Logger.warn("[REAUTH] Re-authentication failed, will fall back to interceptor-based auth:", error);
       this.isAuthenticated = false;
+      this.stopTickle();
     }
   }
 

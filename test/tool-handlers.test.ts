@@ -352,8 +352,9 @@ describe('ToolHandlers', () => {
 
     it('should call reauthenticate when auth status flips to true', async () => {
       mockIBClient.checkAuthenticationStatus = vi.fn()
-        .mockResolvedValueOnce(false)  // Continue past early return
-        .mockResolvedValueOnce(true);  // Browser path: now authenticated
+        .mockResolvedValueOnce(false) // Initial check: not yet authenticated (skip early return)
+        .mockResolvedValueOnce(true)  // Browser path: now authenticated
+        .mockResolvedValueOnce(true); // Final re-check after reauth: still authenticated
       mockIBClient.reauthenticate = vi.fn().mockResolvedValue(undefined);
 
       await (handlers as any).ensureAuth();
@@ -361,14 +362,27 @@ describe('ToolHandlers', () => {
       expect(mockIBClient.reauthenticate).toHaveBeenCalled();
     });
 
-    it('should proceed even if reauthenticate fails', async () => {
+    it('should proceed when reauthenticate fails but session is still authenticated', async () => {
       mockIBClient.checkAuthenticationStatus = vi.fn()
-        .mockResolvedValueOnce(false)
-        .mockResolvedValueOnce(true);
+        .mockResolvedValueOnce(false) // Initial check: skip early return
+        .mockResolvedValueOnce(true)  // Browser path: authenticated
+        .mockResolvedValueOnce(true); // Final re-check still passes
       mockIBClient.reauthenticate = vi.fn().mockRejectedValue(new Error('Reauth failed'));
 
-      // Should not throw — error is caught and logged
+      // Reauth error is swallowed because the final auth status check still succeeds.
       await expect((handlers as any).ensureAuth()).resolves.not.toThrow();
+      expect(mockIBClient.reauthenticate).toHaveBeenCalled();
+    });
+
+    it('should throw when reauthenticate fails and session is no longer authenticated', async () => {
+      mockIBClient.checkAuthenticationStatus = vi.fn()
+        .mockResolvedValueOnce(false) // Initial check: skip early return
+        .mockResolvedValueOnce(true)  // Browser path: authenticated
+        .mockResolvedValueOnce(false); // Final re-check: session lost
+      mockIBClient.reauthenticate = vi.fn().mockRejectedValue(new Error('Reauth failed'));
+
+      await expect((handlers as any).ensureAuth())
+        .rejects.toThrow('Authentication required');
       expect(mockIBClient.reauthenticate).toHaveBeenCalled();
     });
   });
@@ -389,21 +403,32 @@ describe('ToolHandlers', () => {
       mockIBClient.reauthenticate = vi.fn().mockResolvedValue(undefined);
 
       (handlers as any).startBrowserAuthPolling('https://localhost:5000', 5000);
-      await vi.runAllTimersAsync();
+      await vi.advanceTimersByTimeAsync(120_000);
 
       expect(mockIBClient.checkAuthenticationStatus).toHaveBeenCalledTimes(2);
       expect(mockIBClient.reauthenticate).toHaveBeenCalledTimes(1);
     });
 
-    it('should not call reauthenticate when auth never detected', async () => {
+    it('should stop polling once the deadline passes when auth never detected', async () => {
       mockIBClient.checkAuthenticationStatus = vi.fn().mockResolvedValue(false);
       mockIBClient.reauthenticate = vi.fn();
 
       (handlers as any).startBrowserAuthPolling('https://localhost:5000', 5000);
-      await vi.runAllTimersAsync();
+      // Advance past the 2-minute deadline.
+      await vi.advanceTimersByTimeAsync(120_000);
 
-      expect(mockIBClient.checkAuthenticationStatus).toHaveBeenCalledTimes(60);
+      // Deadline-based loop produces fewer than the legacy 60 attempts since the
+      // backoff caps at 10s. We assert (a) reauthenticate was never called and
+      // (b) polling stayed within the documented 2-minute upper bound.
       expect(mockIBClient.reauthenticate).not.toHaveBeenCalled();
+      const attemptsWithinDeadline = (mockIBClient.checkAuthenticationStatus as any).mock.calls.length;
+      expect(attemptsWithinDeadline).toBeGreaterThan(0);
+      expect(attemptsWithinDeadline).toBeLessThan(60);
+
+      // Advancing further must not produce additional polls.
+      await vi.advanceTimersByTimeAsync(120_000);
+      expect((mockIBClient.checkAuthenticationStatus as any).mock.calls.length)
+        .toBe(attemptsWithinDeadline);
     });
 
     it('should handle checkAuthenticationStatus throwing without stopping', async () => {
@@ -413,7 +438,7 @@ describe('ToolHandlers', () => {
       mockIBClient.reauthenticate = vi.fn().mockResolvedValue(undefined);
 
       (handlers as any).startBrowserAuthPolling('https://localhost:5000', 5000);
-      await vi.runAllTimersAsync();
+      await vi.advanceTimersByTimeAsync(120_000);
 
       expect(mockIBClient.checkAuthenticationStatus).toHaveBeenCalledTimes(2);
       expect(mockIBClient.reauthenticate).toHaveBeenCalledTimes(1);

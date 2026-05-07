@@ -121,7 +121,17 @@ export class ToolHandlers {
       try {
         await this.context.ibClient.reauthenticate();
       } catch (e) {
-        Logger.warn("[ENSURE-AUTH] Reauthenticate after status check failed, but status is true:", e);
+        Logger.warn("[ENSURE-AUTH] Reauthenticate after status check failed, will re-check auth status:", e);
+      }
+      // Re-check auth status to honor the ensureAuth contract: if reauthenticate left
+      // the session unauthenticated, propagate the error rather than silently proceeding.
+      const finalAuthStatus = await this.context.ibClient.checkAuthenticationStatus();
+      if (!finalAuthStatus) {
+        const port = this.context.gatewayManager
+          ? this.context.gatewayManager.getCurrentPort()
+          : this.context.config.IB_GATEWAY_PORT;
+        const authUrl = `https://${this.context.config.IB_GATEWAY_HOST}:${port}`;
+        throw new Error(`Authentication required. Please use the 'authenticate' tool to complete the authentication process at ${authUrl}.`);
       }
     }
   }
@@ -159,35 +169,40 @@ export class ToolHandlers {
    * After browser opens for OAuth, poll the gateway until authenticated,
    * then trigger reauthenticate to establish the REST API session.
    * This bridges the gap between browser-based OAuth and the REST API auth state.
+   *
+   * Polling is bounded by a deadline (~2 minutes from start) rather than by attempt
+   * count, so the upper bound matches the documented timeout regardless of backoff.
    */
   private startBrowserAuthPolling(authUrl: string, port: number): void {
-    const maxAttempts = 60; // 2 minutes total
+    const pollWindowMs = 120_000; // 2 minutes total
     const initialDelay = 2000; // 2 second initial delay
+    const maxDelay = 10_000;
+    const deadline = Date.now() + pollWindowMs;
     let attempts = 0;
 
     const poll = async () => {
       attempts++;
-      Logger.log(`[BROWSER-AUTH-POLL] Attempt ${attempts}/${maxAttempts}`);
+      Logger.log(`[BROWSER-AUTH-POLL] Polling ${authUrl} (port ${port}) attempt ${attempts} until ${new Date(deadline).toISOString()}`);
 
       try {
         const isAuth = await this.context.ibClient.checkAuthenticationStatus();
-        
+
         if (isAuth) {
-          Logger.log("[BROWSER-AUTH-POLL] Authentication detected, reauthenticating REST session");
+          Logger.log(`[BROWSER-AUTH-POLL] Authentication detected for ${authUrl} (port ${port}), reauthenticating REST session`);
           // Trigger reauthenticate to establish REST API session
           await this.context.ibClient.reauthenticate();
-          Logger.log("[BROWSER-AUTH-POLL] Reauthentication successful, REST session established");
+          Logger.log(`[BROWSER-AUTH-POLL] Reauthentication successful for ${authUrl} (port ${port}), REST session established`);
           return; // Success, stop polling
         }
       } catch (error) {
-        Logger.warn("[BROWSER-AUTH-POLL] Poll attempt failed:", error);
+        Logger.warn(`[BROWSER-AUTH-POLL] Poll attempt ${attempts} failed for ${authUrl} (port ${port}):`, error);
       }
 
-      if (attempts < maxAttempts) {
-        const delay = Math.min(initialDelay + (attempts * 500), 10000);
+      const delay = Math.min(initialDelay + (attempts * 500), maxDelay);
+      if (Date.now() + delay < deadline) {
         setTimeout(poll, delay);
       } else {
-        Logger.warn("[BROWSER-AUTH-POLL] Timed out waiting for browser authentication");
+        Logger.warn(`[BROWSER-AUTH-POLL] Timed out waiting for browser authentication at ${authUrl} (port ${port}) after ${attempts} attempts`);
       }
     };
 
