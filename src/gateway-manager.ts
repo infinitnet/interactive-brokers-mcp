@@ -1,5 +1,5 @@
 import { spawn, ChildProcess } from 'child_process';
-import { promises as fs } from 'fs';
+import { promises as fs, existsSync as fsExistsSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { createRequire } from 'module';
@@ -20,6 +20,8 @@ export class IBGatewayManager {
   private cleanupHandlersRegistered = false;
   private currentPort: number = 5000;
   private backgroundStartupPromise: Promise<void> | null = null;
+  private spawnFailure: { reason: string; details?: string } | null = null;
+  private static readonly STDERR_TAIL_BYTES = 4096;
 
   constructor() {
     this.gatewayDir = path.join(__dirname, '../ib-gateway');
@@ -134,17 +136,42 @@ export class IBGatewayManager {
   // Removed forceKillGateway - we never kill gateway processes anymore
 
   private getJavaPath(): string {
-    const platform = `${process.platform}-${process.arch}`;
     const isWindows = process.platform === 'win32';
     const javaExecutable = isWindows ? 'java.exe' : 'java';
-    
+
+    let platform = `${process.platform}-${process.arch}`;
+    if (process.platform === 'linux' && IBGatewayManager.isMuslLibc()) {
+      platform = `${platform}-musl`;
+    }
+
     const runtimePath = path.join(this.jreDir, platform, 'bin', javaExecutable);
-    
-    if (!require('fs').existsSync(runtimePath)) {
+
+    if (!fsExistsSync(runtimePath)) {
       throw new Error(`Custom runtime not found for platform: ${platform}. Expected at: ${runtimePath}`);
     }
-    
+
     return runtimePath;
+  }
+
+  // Detect whether the current Linux system uses musl libc (Alpine, etc.) rather than glibc.
+  // The bundled glibc JRE cannot exec on musl — its ELF interpreter /lib64/ld-linux-x86-64.so.2
+  // does not exist there, producing an opaque ENOENT at spawn time.
+  static isMuslLibc(): boolean {
+    if (process.platform !== 'linux') {
+      return false;
+    }
+    // process.report.getReport() exposes glibcVersionRuntime when glibc is present.
+    try {
+      const report = (process as { report?: { getReport: () => { header?: { glibcVersionRuntime?: string } } } }).report;
+      const glibcRuntime = report?.getReport?.().header?.glibcVersionRuntime;
+      if (typeof glibcRuntime === 'string' && glibcRuntime.length > 0) {
+        return false;
+      }
+    } catch {
+      // Fall through to filesystem check.
+    }
+    // Fallback: presence of the musl loader in its standard path.
+    return fsExistsSync('/lib/ld-musl-x86_64.so.1') || fsExistsSync('/lib/ld-musl-aarch64.so.1');
   }
 
   async ensureGatewayExists(): Promise<void> {
@@ -251,7 +278,8 @@ export class IBGatewayManager {
     }
 
     this.isStarting = true;
-    
+    this.spawnFailure = null;
+
     try {
       await this.ensureGatewayExists();
       
@@ -319,6 +347,10 @@ export class IBGatewayManager {
         stdio: ['ignore', 'pipe', 'pipe']
       });
 
+      // Buffer the tail of stderr so we can include it in a failure reason if the process
+      // dies before the gateway's HTTP port comes up.
+      let stderrTail = '';
+
       this.gatewayProcess.stdout?.on('data', (data) => {
         const output = data.toString().trim();
         if (output) {
@@ -332,20 +364,32 @@ export class IBGatewayManager {
       });
 
       this.gatewayProcess.stderr?.on('data', (data) => {
-        const output = data.toString().trim();
-        if (output && !output.includes('WARNING')) {
-          Logger.error(`[Gateway Error] ${output}`);
+        const chunk = data.toString();
+        stderrTail = (stderrTail + chunk).slice(-IBGatewayManager.STDERR_TAIL_BYTES);
+        const trimmed = chunk.trim();
+        if (trimmed && !trimmed.includes('WARNING')) {
+          Logger.error(`[Gateway Error] ${trimmed}`);
         }
       });
 
       this.gatewayProcess.on('error', (error) => {
         Logger.error('❌ Gateway process error:', error.message);
+        this.spawnFailure = {
+          reason: this.diagnoseSpawnError(error, bundledJavaPath),
+          details: error.message,
+        };
         this.isStarting = false;
         this.isReady = false;
       });
 
       this.gatewayProcess.on('exit', (code, signal) => {
         this.log(`🛑 Gateway process exited with code ${code}, signal ${signal}`);
+        if (!this.isReady && code !== 0 && code !== null) {
+          this.spawnFailure = {
+            reason: `IB Gateway process exited with code ${code} before becoming ready`,
+            details: stderrTail.trim() || `(no stderr captured; signal=${signal ?? 'none'})`,
+          };
+        }
         this.gatewayProcess = null;
         this.isStarting = false;
         this.isReady = false;
@@ -371,6 +415,11 @@ export class IBGatewayManager {
     let attempts = 0;
 
     while (attempts < maxAttempts) {
+      // Bail out early if the child process already failed — no point polling for 30s.
+      if (this.spawnFailure) {
+        throw this.buildSpawnFailureError();
+      }
+
       try {
         // Try to connect to the gateway port
         const response = await this.checkGatewayHealth();
@@ -384,13 +433,38 @@ export class IBGatewayManager {
 
       attempts++;
       await new Promise(resolve => setTimeout(resolve, 1000));
-      
+
       if (attempts % 5 === 0) {
         this.log(`⏳ Still waiting for gateway... (${attempts}/${maxAttempts})`);
       }
     }
 
+    if (this.spawnFailure) {
+      throw this.buildSpawnFailureError();
+    }
     throw new Error('IB Gateway failed to start within 30 seconds');
+  }
+
+  private buildSpawnFailureError(): Error {
+    const failure = this.spawnFailure!;
+    const detail = failure.details ? `\nDetails: ${failure.details}` : '';
+    return new Error(`${failure.reason}${detail}`);
+  }
+
+  private diagnoseSpawnError(error: NodeJS.ErrnoException, javaPath: string): string {
+    if (error.code === 'ENOENT' && process.platform === 'linux' && IBGatewayManager.isMuslLibc()) {
+      // Defensive: getJavaPath should have already routed to runtime/linux-*-musl. If we still hit
+      // ENOENT on musl it's almost certainly a missing musl runtime directory in this build.
+      return `Failed to spawn bundled JRE at ${javaPath}: musl libc detected but the musl JRE was not found. ` +
+        `If you built this package locally, ensure runtime/linux-x64-musl and runtime/linux-arm64-musl are present.`;
+    }
+    if (error.code === 'ENOENT') {
+      return `Failed to spawn bundled JRE at ${javaPath}: file not found or its dynamic loader is missing on this system.`;
+    }
+    if (error.code === 'EACCES') {
+      return `Failed to spawn bundled JRE at ${javaPath}: permission denied (the file may not be executable).`;
+    }
+    return `Failed to spawn IB Gateway: ${error.message}`;
   }
 
   private async checkGatewayHealth(): Promise<boolean> {
