@@ -149,3 +149,4 @@ ib-gateway/clientportal.gw/.vertx/
 
 # Docker volumes
 data/
+.claude/settings.local.json
