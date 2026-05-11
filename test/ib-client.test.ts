@@ -535,41 +535,85 @@ describe('IBClient', () => {
   });
 
   describe('reauthenticate', () => {
-    it('should reauthenticate and start tickle on success', async () => {
+    it('should initialize brokerage session using the official ssodh/init form body', async () => {
       const mockAuthClient = {
         post: vi.fn().mockResolvedValue({ data: {} }),
-        get: vi.fn().mockResolvedValue({
-          data: { authenticated: true },
-        }),
+        get: vi.fn()
+          .mockResolvedValueOnce({ data: { RESULT: true } })
+          .mockResolvedValueOnce({
+            data: {
+              authenticated: false,
+              connected: true,
+              MAC: '06:7F:1D:C4:36:2F',
+              hardware_info: '71a482fc|06:7F:1D:C4:36:2F',
+            },
+          })
+          .mockRejectedValueOnce(new Error('not ready'))
+          .mockResolvedValueOnce({
+            data: { authenticated: true, connected: true, established: true },
+          }),
       };
       
       vi.mocked(axios.create).mockReturnValueOnce(mockAuthClient as any);
       
       await client.reauthenticate();
       
-      expect(mockAuthClient.post).toHaveBeenCalledWith('/iserver/reauthenticate');
+      expect(mockAuthClient.get).toHaveBeenCalledWith('/sso/validate');
       expect(mockAuthClient.get).toHaveBeenCalledWith('/iserver/auth/status');
+      expect(mockAuthClient.get).toHaveBeenCalledWith('/iserver/accounts');
+      expect(mockAuthClient.post).toHaveBeenCalledWith(
+        '/iserver/auth/ssodh/init',
+        expect.stringContaining('compete=true'),
+        expect.objectContaining({
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        })
+      );
+      expect(mockAuthClient.post).toHaveBeenCalledWith(
+        '/iserver/auth/ssodh/init',
+        expect.stringContaining('mac=06-7F-1D-C4-36-2F'),
+        expect.any(Object)
+      );
+      expect(mockAuthClient.post).toHaveBeenCalledWith(
+        '/iserver/auth/ssodh/init',
+        expect.stringContaining('machineId=71a482fc'),
+        expect.any(Object)
+      );
+      expect(mockAuthClient.post).toHaveBeenCalledWith('/iserver/reauthenticate');
+      expect(mockAuthClient.post).toHaveBeenCalledWith('/tickle');
     });
 
-    it('should handle reauth when status returns false', async () => {
+    it('should handle reauth when final status returns false', async () => {
       const mockAuthClient = {
         post: vi.fn().mockResolvedValue({ data: {} }),
-        get: vi.fn().mockResolvedValue({
-          data: { authenticated: false },
-        }),
+        get: vi.fn()
+          .mockResolvedValueOnce({ data: { RESULT: true } })
+          .mockResolvedValueOnce({
+            data: {
+              authenticated: false,
+              connected: true,
+              MAC: '06:7F:1D:C4:36:2F',
+              hardware_info: '71a482fc|06:7F:1D:C4:36:2F',
+            },
+          })
+          .mockRejectedValueOnce(new Error('not ready'))
+          .mockResolvedValueOnce({ data: { authenticated: false, connected: true } }),
       };
 
       vi.mocked(axios.create).mockReturnValueOnce(mockAuthClient as any);
 
       // Should not throw — handled internally
       await expect(client.reauthenticate()).resolves.not.toThrow();
-      expect(mockAuthClient.post).toHaveBeenCalledWith('/iserver/reauthenticate');
+      expect(mockAuthClient.post).toHaveBeenCalledWith(
+        '/iserver/auth/ssodh/init',
+        expect.any(String),
+        expect.any(Object)
+      );
     });
 
     it('should handle network errors gracefully', async () => {
       const mockAuthClient = {
-        post: vi.fn().mockRejectedValue(new Error('Connection refused')),
-        get: vi.fn(),
+        post: vi.fn(),
+        get: vi.fn().mockRejectedValue(new Error('Connection refused')),
       };
 
       vi.mocked(axios.create).mockReturnValueOnce(mockAuthClient as any);
@@ -588,27 +632,29 @@ describe('IBClient', () => {
         vi.mocked(axios.create).mockReturnValueOnce(checkClient as any);
         await client.checkAuthenticationStatus();
 
-        // Capture the tickle axios instance the next time axios.create is called
-        // (startTickle uses axios.create per ping).
         const tickleClient = {
           post: vi.fn().mockResolvedValue({ data: {} }),
         };
-        // Step 2: trigger reauth failure (status=false). reauthenticate() itself
-        // calls axios.create once; subsequent tickle pings (which should NOT happen)
-        // would also call axios.create.
         const reauthClient = {
           post: vi.fn().mockResolvedValue({ data: {} }),
-          get: vi.fn().mockResolvedValue({ data: { authenticated: false } }),
+          get: vi.fn()
+            .mockResolvedValueOnce({ data: { RESULT: true } })
+            .mockResolvedValueOnce({
+              data: {
+                authenticated: false,
+                connected: true,
+                MAC: '06:7F:1D:C4:36:2F',
+                hardware_info: '71a482fc|06:7F:1D:C4:36:2F',
+              },
+            })
+            .mockRejectedValueOnce(new Error('not ready'))
+            .mockResolvedValueOnce({ data: { authenticated: false, connected: true } }),
         };
         vi.mocked(axios.create).mockReturnValueOnce(reauthClient as any);
-        // Any further axios.create calls (e.g., from a stray tickle) would hit this
-        // mock and produce visible POST /tickle calls.
         vi.mocked(axios.create).mockReturnValue(tickleClient as any);
 
         await client.reauthenticate();
 
-        // Advance well past the tickle interval (30s). If tickle were still running
-        // we would see /tickle POSTs against tickleClient.
         await vi.advanceTimersByTimeAsync(120_000);
         expect(tickleClient.post).not.toHaveBeenCalled();
       } finally {
@@ -630,8 +676,8 @@ describe('IBClient', () => {
           post: vi.fn().mockResolvedValue({ data: {} }),
         };
         const reauthClient = {
-          post: vi.fn().mockRejectedValue(new Error('Connection refused')),
-          get: vi.fn(),
+          post: vi.fn(),
+          get: vi.fn().mockRejectedValue(new Error('Connection refused')),
         };
         vi.mocked(axios.create).mockReturnValueOnce(reauthClient as any);
         vi.mocked(axios.create).mockReturnValue(tickleClient as any);

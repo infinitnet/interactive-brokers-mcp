@@ -135,13 +135,30 @@ export class HeadlessAuthenticator {
           const authSuccess = pageContent.includes('Client login succeeds');
 
           if (authSuccess) {
-            Logger.info('🎉 Authentication completed! Found "Client login succeeds" message.');
-            await this.cleanup();
-            
-            return {
-              success: true,
-              message: 'Headless authentication completed successfully. Client login succeeds message detected.'
-            };
+            Logger.info('🎉 Browser login reports "Client login succeeds"; initializing REST brokerage session...');
+
+            if (authConfig.ibClient) {
+              await authConfig.ibClient.reauthenticate();
+              const isAuthenticated = await authConfig.ibClient.checkAuthenticationStatus();
+              if (isAuthenticated) {
+                Logger.info('🎉 Authentication completed! IB Client confirmed REST brokerage authentication.');
+                await this.cleanup();
+
+                return {
+                  success: true,
+                  message: 'Headless authentication completed successfully. REST brokerage session confirmed.'
+                };
+              }
+
+              Logger.info('🔍 Browser login succeeded, but REST brokerage session is not authenticated yet; continuing to wait...');
+            } else {
+              await this.cleanup();
+
+              return {
+                success: true,
+                message: 'Headless browser login completed. No IB client was provided to verify REST brokerage authentication.'
+              };
+            }
           }
 
           // Check for potential 2FA or other intermediate states

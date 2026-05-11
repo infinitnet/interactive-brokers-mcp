@@ -116,6 +116,20 @@ export class IBClient {
     );
   }
 
+  private createRawClient(timeout = 30000): AxiosInstance {
+    return axios.create({
+      baseURL: this.baseUrl,
+      timeout,
+      httpsAgent: new https.Agent({
+        rejectUnauthorized: false,
+      }),
+    });
+  }
+
+  private isStatusAuthenticated(status: any): boolean {
+    return status?.authenticated === true && status?.connected !== false;
+  }
+
   updatePort(newPort: number): void {
     if (this.config.port !== newPort) {
       Logger.log(`[CLIENT] Updating port from ${this.config.port} to ${newPort}`);
@@ -135,18 +149,12 @@ export class IBClient {
       Logger.log("[AUTH-CHECK] Checking authentication status...");
       
       // Create a new axios instance without interceptors to avoid triggering authentication
-      const authClient = axios.create({
-        baseURL: this.baseUrl,
-        timeout: 30000,
-        httpsAgent: new https.Agent({
-          rejectUnauthorized: false,
-        }),
-      });
+      const authClient = this.createRawClient();
       
       const response = await authClient.get("/iserver/auth/status");
       Logger.log("[AUTH-CHECK] Auth status response:", response.data);
       
-      const authenticated = response.data.authenticated === true;
+      const authenticated = this.isStatusAuthenticated(response.data);
       this.isAuthenticated = authenticated;
       
       if (authenticated) {
@@ -171,13 +179,7 @@ export class IBClient {
   private async tickle(): Promise<void> {
     try {
       // Create a new axios instance without interceptors to avoid triggering authentication
-      const tickleClient = axios.create({
-        baseURL: this.baseUrl,
-        timeout: 10000,
-        httpsAgent: new https.Agent({
-          rejectUnauthorized: false,
-        }),
-      });
+      const tickleClient = this.createRawClient(10000);
       
       await tickleClient.post("/tickle");
       Logger.log("[TICKLE] Session maintenance ping sent successfully");
@@ -225,33 +227,97 @@ export class IBClient {
   }
 
   /**
+   * Initialize/recover the Client Portal Gateway brokerage session.
+   *
+   * A Gateway web login can produce a valid SSO session while `/iserver/auth/status`
+   * remains `authenticated:false`. IBKR's brokerage-session init endpoint requires
+   * an x-www-form-urlencoded body derived from auth/status. An empty POST may return
+   * HTTP 200 but leave the session unauthenticated with:
+   * "Force compete capability must be used together with compete flag".
+   */
+  private async initializeBrokerageSession(): Promise<boolean> {
+    const authClient = this.createRawClient();
+
+    Logger.log("[BROKERAGE-INIT] Validating SSO session...");
+    await authClient.get("/sso/validate");
+
+    Logger.log("[BROKERAGE-INIT] Reading auth status for MAC/hardware info...");
+    let statusResponse = await authClient.get("/iserver/auth/status");
+    Logger.log("[BROKERAGE-INIT] Auth status response:", statusResponse.data);
+
+    if (this.isStatusAuthenticated(statusResponse.data)) {
+      this.isAuthenticated = true;
+      this.authAttempts = 0;
+      this.startTickle();
+      return true;
+    }
+
+    const rawMac = String(statusResponse.data?.MAC || "");
+    const rawHardware = String(statusResponse.data?.hardware_info || "");
+    const machineId = rawHardware.split("|")[0] || "";
+    const mac = rawMac.replaceAll(":", "-");
+
+    // This endpoint may 401 before the brokerage session is initialized, but it
+    // can also trigger Gateway-side state; treat failures as non-fatal.
+    try {
+      await authClient.get("/iserver/accounts");
+    } catch (error) {
+      Logger.debug("[BROKERAGE-INIT] /iserver/accounts not ready before ssodh/init; continuing", error);
+    }
+
+    if (!machineId || !mac) {
+      Logger.warn("[BROKERAGE-INIT] Missing machineId or MAC from /iserver/auth/status; cannot call ssodh/init form flow");
+      this.isAuthenticated = false;
+      this.stopTickle();
+      return false;
+    }
+
+    const ssodhBody = new URLSearchParams({
+      compete: "true",
+      locale: "en_US",
+      mac,
+      machineId,
+      username: "-",
+    }).toString();
+
+    Logger.log("[BROKERAGE-INIT] Initializing brokerage session via /iserver/auth/ssodh/init...");
+    await authClient.post("/iserver/auth/ssodh/init", ssodhBody, {
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+    });
+
+    Logger.log("[BROKERAGE-INIT] Triggering /iserver/reauthenticate...");
+    await authClient.post("/iserver/reauthenticate");
+
+    // /tickle both keeps the session alive and returns nested iserver authStatus.
+    await authClient.post("/tickle");
+
+    statusResponse = await authClient.get("/iserver/auth/status");
+    Logger.log("[BROKERAGE-INIT] Final auth status response:", statusResponse.data);
+
+    const authenticated = this.isStatusAuthenticated(statusResponse.data);
+    this.isAuthenticated = authenticated;
+
+    if (authenticated) {
+      this.authAttempts = 0;
+      this.startTickle();
+    } else {
+      this.stopTickle();
+    }
+
+    return authenticated;
+  }
+
+  /**
    * Re-authenticate the REST API session after browser OAuth completes.
    * This must be called after the browser login creates the server-side session.
    */
   async reauthenticate(): Promise<void> {
     try {
-      const authClient = axios.create({
-        baseURL: this.baseUrl,
-        timeout: 30000,
-        httpsAgent: new https.Agent({
-          rejectUnauthorized: false,
-        }),
-      });
-      
-      Logger.log("[REAUTH] Re-authenticating REST session...");
-      await authClient.post("/iserver/reauthenticate");
-      
-      // Verify the reauthentication worked
-      const statusResponse = await authClient.get("/iserver/auth/status");
-      if (statusResponse.data.authenticated) {
+      const authenticated = await this.initializeBrokerageSession();
+      if (authenticated) {
         Logger.log("[REAUTH] Re-authentication successful");
-        this.isAuthenticated = true;
-        this.authAttempts = 0;
-        this.startTickle();
       } else {
         Logger.warn("[REAUTH] Re-authentication request sent but auth status is still false, will retry via interceptor");
-        this.isAuthenticated = false;
-        this.stopTickle();
       }
     } catch (error) {
       Logger.warn("[REAUTH] Re-authentication failed, will fall back to interceptor-based auth:", error);
@@ -265,37 +331,17 @@ export class IBClient {
     this.authAttempts++;
     
     try {
-      // Create a new axios instance without interceptors to avoid infinite recursion
-      const authClient = axios.create({
-        baseURL: this.baseUrl,
-        timeout: 30000,
-        httpsAgent: new https.Agent({
-          rejectUnauthorized: false,
-        }),
-      });
-      
-      // Check if already authenticated
-      Logger.log("[AUTH] Checking authentication status...");
-      const response = await authClient.get("/iserver/auth/status");
-      Logger.log("[AUTH] Auth status response:", response.data);
-      
-      if (response.data.authenticated) {
-        Logger.log("[AUTH] Already authenticated");
-        this.isAuthenticated = true;
-        this.authAttempts = 0; // Reset on success
-        this.startTickle(); // Start session maintenance
+      const authenticated = await this.initializeBrokerageSession();
+      if (authenticated) {
+        Logger.log("[AUTH] Brokerage session authenticated");
         return;
       }
 
-      // Re-authenticate if needed
-      Logger.log("[AUTH] Re-authenticating...");
-      await authClient.post("/iserver/reauthenticate");
-      Logger.log("[AUTH] Re-authentication successful");
-      this.isAuthenticated = true;
-      this.authAttempts = 0; // Reset on success
-      this.startTickle(); // Start session maintenance
+      throw new Error("Gateway is reachable but the IBKR brokerage session is not authenticated yet. Complete browser/2FA login and retry.");
     } catch (error) {
       Logger.error(`[AUTH] Authentication failed (attempt ${this.authAttempts}/${this.maxAuthAttempts}):`, isError(error) && error.message, isError(error) && error.stack);
+      this.isAuthenticated = false;
+      this.stopTickle();
       if (this.authAttempts >= this.maxAuthAttempts) {
         throw new Error(`Failed to authenticate with IB Gateway after ${this.maxAuthAttempts} attempts`);
       }
