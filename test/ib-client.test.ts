@@ -477,15 +477,59 @@ describe('IBClient', () => {
     });
 
     describe('getOrders', () => {
-      it('should fetch all orders', async () => {
+      it('should fetch orders for all discovered trading accounts', async () => {
         const mockClient = vi.mocked(axios.create).mock.results[0].value;
-        const mockOrders = [{ orderId: '123', status: 'Filled' }];
+        const firstAccountOrders = [{ orderId: '123', status: 'Filled' }];
+        const secondAccountOrders = [{ orderId: '456', status: 'Submitted' }];
         
-        mockClient.get.mockResolvedValueOnce({ data: mockOrders });
+        mockClient.get
+          .mockResolvedValueOnce({ data: { accounts: ['U12345', { accountId: 'U67890' }], selectedAccount: 'U12345' } })
+          .mockResolvedValueOnce({ data: { orders: firstAccountOrders } })
+          .mockResolvedValueOnce({ data: { orders: secondAccountOrders } });
         
         const result = await client.getOrders();
         
-        expect(mockClient.get).toHaveBeenCalledWith('/iserver/account/orders', { params: {} });
+        expect(mockClient.get).toHaveBeenNthCalledWith(1, '/iserver/accounts');
+        expect(mockClient.get).toHaveBeenNthCalledWith(2, '/iserver/account/orders', { params: { accountId: 'U12345' } });
+        expect(mockClient.get).toHaveBeenNthCalledWith(3, '/iserver/account/orders', { params: { accountId: 'U67890' } });
+        expect(result.orders).toEqual([...firstAccountOrders, ...secondAccountOrders]);
+        expect(result.accountResults).toEqual([
+          { accountId: 'U12345', data: { orders: firstAccountOrders } },
+          { accountId: 'U67890', data: { orders: secondAccountOrders } },
+        ]);
+      });
+
+      it('should fall back to portfolio accounts when iserver account discovery fails', async () => {
+        const mockClient = vi.mocked(axios.create).mock.results[0].value;
+        const mockOrders = [{ orderId: '123', status: 'Filled' }];
+        
+        mockClient.get
+          .mockRejectedValueOnce(new Error('iserver accounts unavailable'))
+          .mockResolvedValueOnce({ data: [{ id: 'U12345' }] })
+          .mockResolvedValueOnce({ data: { orders: mockOrders } });
+        
+        const result = await client.getOrders();
+        
+        expect(mockClient.get).toHaveBeenNthCalledWith(1, '/iserver/accounts');
+        expect(mockClient.get).toHaveBeenNthCalledWith(2, '/portfolio/accounts');
+        expect(mockClient.get).toHaveBeenNthCalledWith(3, '/iserver/account/orders', { params: { accountId: 'U12345' } });
+        expect(result.orders).toEqual(mockOrders);
+      });
+
+      it('should fall back to an unscoped orders request when account discovery returns no accounts', async () => {
+        const mockClient = vi.mocked(axios.create).mock.results[0].value;
+        const mockOrders = [{ orderId: '123', status: 'Filled' }];
+        
+        mockClient.get
+          .mockResolvedValueOnce({ data: { accounts: [] } })
+          .mockResolvedValueOnce({ data: [] })
+          .mockResolvedValueOnce({ data: mockOrders });
+        
+        const result = await client.getOrders();
+        
+        expect(mockClient.get).toHaveBeenNthCalledWith(1, '/iserver/accounts');
+        expect(mockClient.get).toHaveBeenNthCalledWith(2, '/portfolio/accounts');
+        expect(mockClient.get).toHaveBeenNthCalledWith(3, '/iserver/account/orders', { params: {} });
         expect(result).toEqual(mockOrders);
       });
 

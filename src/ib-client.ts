@@ -739,17 +739,100 @@ export class IBClient {
     }
   }
 
+  private normalizeAccountId(account: any): string | undefined {
+    if (!account) {
+      return undefined;
+    }
+
+    if (typeof account === "string") {
+      return account.trim() || undefined;
+    }
+
+    const id = account.id ?? account.accountId ?? account.account_id ?? account.acctId ?? account.account;
+    return typeof id === "string" && id.trim() ? id.trim() : undefined;
+  }
+
+  private extractAccountIds(data: any): string[] {
+    const candidates = [
+      ...(Array.isArray(data) ? data : []),
+      ...(Array.isArray(data?.accounts) ? data.accounts : []),
+      ...(Array.isArray(data?.accountIds) ? data.accountIds : []),
+      data?.selectedAccount,
+      data?.selected_account,
+    ];
+
+    return [...new Set(
+      candidates
+        .map((account) => this.normalizeAccountId(account))
+        .filter((accountId): accountId is string => Boolean(accountId))
+    )];
+  }
+
+  private extractOrders(data: any): any[] {
+    if (Array.isArray(data)) {
+      return data;
+    }
+
+    if (Array.isArray(data?.orders)) {
+      return data.orders;
+    }
+
+    return [];
+  }
+
+  private async getOrderAccountIds(): Promise<string[]> {
+    const accountSources = [
+      { label: "/iserver/accounts", fetch: () => this.client.get("/iserver/accounts") },
+      { label: "/portfolio/accounts", fetch: () => this.client.get("/portfolio/accounts") },
+    ];
+
+    for (const source of accountSources) {
+      try {
+        const response = await source.fetch();
+        const accountIds = this.extractAccountIds(response.data);
+        if (accountIds.length > 0) {
+          return accountIds;
+        }
+      } catch (error) {
+        Logger.warn(`[ORDERS] Failed to discover accounts via ${source.label}:`, error);
+      }
+    }
+
+    return [];
+  }
+
   async getOrders(accountId?: string): Promise<any> {
     try {
       const url = "/iserver/account/orders";
-      const params: any = {};
       
       if (accountId) {
-        params.accountId = accountId;
+        const response = await this.client.get(url, { params: { accountId } });
+        return response.data;
       }
 
-      const response = await this.client.get(url, { params });
-      return response.data;
+      const accountIds = await this.getOrderAccountIds();
+      if (accountIds.length === 0) {
+        Logger.warn("[ORDERS] Could not discover account IDs; falling back to unscoped orders request");
+        const response = await this.client.get(url, { params: {} });
+        return response.data;
+      }
+
+      const accountResults = [];
+      const orders: any[] = [];
+
+      for (const discoveredAccountId of accountIds) {
+        const response = await this.client.get(url, { params: { accountId: discoveredAccountId } });
+        accountResults.push({
+          accountId: discoveredAccountId,
+          data: response.data,
+        });
+        orders.push(...this.extractOrders(response.data));
+      }
+
+      return {
+        orders,
+        accountResults,
+      };
     } catch (error) {
       Logger.error("Failed to get orders:", error);
       
