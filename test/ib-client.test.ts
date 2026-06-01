@@ -743,6 +743,57 @@ describe('IBClient', () => {
       expect(mockAuthClient.post).toHaveBeenCalledWith('/tickle');
     });
 
+    it('should initialize brokerage session using SSO HARDWARE_INFO when auth status omits hardware_info', async () => {
+      const mockAuthClient = {
+        post: vi.fn().mockResolvedValue({ data: {}, status: 200 }),
+        get: vi.fn()
+          .mockResolvedValueOnce({
+            data: {
+              RESULT: true,
+              HARDWARE_INFO: '71a482fc|06:7F:1D:C4:36:2F',
+            },
+            status: 200,
+          })
+          .mockResolvedValueOnce({
+            data: {
+              authenticated: false,
+              connected: true,
+              MAC: 'AA:AA:AA:AA:AA:AA',
+            },
+            status: 200,
+          })
+          .mockRejectedValueOnce(new Error('not ready'))
+          .mockResolvedValueOnce({ data: {}, status: 200 })
+          .mockResolvedValueOnce({ data: [], status: 200 })
+          .mockResolvedValueOnce({
+            data: { authenticated: true, connected: true, established: true },
+            status: 200,
+          }),
+      };
+
+      vi.mocked(axios.create).mockReturnValueOnce(mockAuthClient as any);
+
+      await expect(client.initializeBrokerageSession()).resolves.toBe(true);
+
+      expect(mockAuthClient.post).toHaveBeenCalledWith(
+        '/iserver/auth/ssodh/init',
+        expect.stringContaining('machineId=71a482fc'),
+        expect.objectContaining({
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        })
+      );
+      expect(mockAuthClient.post).toHaveBeenCalledWith(
+        '/iserver/auth/ssodh/init',
+        expect.stringContaining('mac=06-7F-1D-C4-36-2F'),
+        expect.any(Object)
+      );
+      expect(mockAuthClient.post).not.toHaveBeenCalledWith(
+        '/iserver/auth/ssodh/init',
+        expect.stringContaining('mac=AA-AA-AA-AA-AA-AA'),
+        expect.any(Object)
+      );
+    });
+
     it('should handle reauth when final status returns false', async () => {
       const mockAuthClient = {
         post: vi.fn().mockResolvedValue({ data: {} }),

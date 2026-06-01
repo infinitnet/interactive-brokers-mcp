@@ -477,7 +477,8 @@ export class IBClient {
     const runOfficialSequence = async (client: AxiosInstance, labelPrefix: string, expectFinal = false): Promise<any> => {
       Logger.log(`[BROKERAGE-INIT] Running official Gateway brokerage sequence (${labelPrefix})...`);
 
-      await tryRequest(`${labelPrefix} GET /v1/api/sso/validate`, () => client.get("/sso/validate"));
+      const ssoValidateResponse = await tryRequest(`${labelPrefix} GET /v1/api/sso/validate`, () => client.get("/sso/validate"));
+      const ssoValidation = ssoValidateResponse?.data || {};
       let statusResponse = await tryRequest(`${labelPrefix} GET /v1/api/iserver/auth/status`, () => client.get("/iserver/auth/status"));
       if (this.isStatusAuthenticated(statusResponse?.data)) {
         return statusResponse?.data;
@@ -488,9 +489,19 @@ export class IBClient {
       await tryRequest(`${labelPrefix} GET /v1/api/iserver/accounts`, () => client.get("/iserver/accounts"));
 
       const authStatus = statusResponse?.data || {};
-      const rawMac = String(authStatus.MAC || "");
-      const rawHardware = String(authStatus.hardware_info || "");
-      const machineId = rawHardware.split("|")[0] || "";
+      // Some Gateway/SSO combinations report HARDWARE_INFO only from
+      // /sso/validate after mobile 2FA succeeds, while /iserver/auth/status
+      // still omits hardware_info until ssodh/init runs. In that state, using
+      // an empty ssodh/init body can leave authenticated=false indefinitely.
+      // Keep machineId and MAC from the same source when falling back to SSO.
+      const authHardware = String(authStatus.hardware_info || "");
+      const ssoHardware = String(ssoValidation.HARDWARE_INFO || "");
+      const rawHardware = authHardware || ssoHardware;
+      const hardwareParts = rawHardware.split("|");
+      const machineId = hardwareParts[0] || "";
+      const rawMac = authHardware
+        ? String(authStatus.MAC || hardwareParts[1] || "")
+        : String(hardwareParts[1] || authStatus.MAC || "");
       const mac = rawMac.replaceAll(":", "-");
 
       if (machineId && mac) {

@@ -179,6 +179,26 @@ export class HeadlessAuthenticator {
           if (authConfig.ibClient && credentialsSubmitted) {
             const cookies = await this.page.context().cookies();
             authConfig.ibClient.setSessionCookies(cookies);
+
+            const now = Date.now();
+            if (now - lastBrokerageInitAttempt > 15000) {
+              lastBrokerageInitAttempt = now;
+              try {
+                const initialized = await authConfig.ibClient.initializeBrokerageSession();
+                if (initialized) {
+                  Logger.info('🎉 Authentication completed! Brokerage session initialized after SSO/mobile approval.');
+                  await this.cleanup();
+
+                  return {
+                    success: true,
+                    status: 'SUCCESS',
+                    message: 'Headless authentication completed successfully. Brokerage session initialized after SSO/mobile approval.'
+                  };
+                }
+              } catch (error: any) {
+                Logger.debug('Brokerage session initialization not ready yet, continuing...', error?.message || String(error));
+              }
+            }
           }
 
           // Check if we successfully authenticated by looking for the specific success message
